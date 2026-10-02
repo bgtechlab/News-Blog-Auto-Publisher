@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import logging
 import os
@@ -16,6 +16,22 @@ from telegram import Bot
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# ================= 0. IST DATE / TIME HELPERS =================
+# GitHub Actions UTC me chalta hai, isliye hamesha IST (UTC+5:30) use karo.
+IST = timezone(timedelta(hours=5, minutes=30))
+HINDI_MONTHS = ["जनवरी", "फ़रवरी", "मार्च", "अप्रैल", "मई", "जून",
+                "जुलाई", "अगस्त", "सितंबर", "अक्टूबर", "नवंबर", "दिसंबर"]
+
+
+def ist_now():
+    return datetime.now(IST)
+
+
+def ist_date_hi(dt=None):
+    dt = dt or ist_now()
+    return f"{dt.day:02d} {HINDI_MONTHS[dt.month - 1]} {dt.year}"
+
 
 # ================= 1. CONFIGURATION =================
 # SURAKSHA NOTE: koi bhi secret yahan hardcode NAHI karna — sirf GitHub Secrets
@@ -42,37 +58,53 @@ HEADERS = {
 client = Client()
 
 # ================= 2. ADVANCED SCRAPER =================
+def _has_keyword(text_lower, keywords):
+    """English keywords ko poore shabd ki tarah match karta hai (jaise 'ai' ab 'rain' me nahi milega).
+    Hindi keywords substring se match hote hain."""
+    for k in keywords:
+        if k.isascii():
+            if re.search(rf"\b{re.escape(k)}\b", text_lower):
+                return True
+        elif k in text_lower:
+            return True
+    return False
+
+
 def fallback_category_detection(text):
     text_lower = text.lower()
-    if any(k in text_lower for k in ["cricket", "match", "dpl", "score", "ipl", "football", "trophy", "sports", "खेल"]):
+    if _has_keyword(text_lower, ["cricket", "match", "dpl", "score", "ipl", "football", "trophy", "sports", "खेल"]):
         return "Sports"
-    elif any(k in text_lower for k in ["election", "bjp", "congress", "parliament", "minister", "modi", "governance", "राजनीति"]):
+    elif _has_keyword(text_lower, ["election", "bjp", "congress", "parliament", "minister", "modi", "governance", "राजनीति"]):
         return "Politics"
-    elif any(k in text_lower for k in ["ai", "mobile", "app", "tech", "software", "google", "apple", "टेक"]):
+    elif _has_keyword(text_lower, ["ai", "mobile", "app", "tech", "software", "google", "apple", "टेक"]):
         return "Tech"
-    elif any(k in text_lower for k in ["recruitment", "vacancy", "admit card", "exam", "railway", "jobs", "नौकरी"]):
+    elif _has_keyword(text_lower, ["recruitment", "vacancy", "admit card", "exam", "railway", "jobs", "नौकरी"]):
         return "Jobs"
-    elif any(k in text_lower for k in ["sensex", "nifty", "tax", "budget", "bank", "economy", "बिजनेस"]):
+    elif _has_keyword(text_lower, ["sensex", "nifty", "tax", "budget", "bank", "economy", "बिजनेस"]):
         return "Business"
-    elif any(k in text_lower for k in ["movie", "actor", "box office", "bollywood", "cinema", "मनोरंजन"]):
+    elif _has_keyword(text_lower, ["movie", "actor", "box office", "bollywood", "cinema", "मनोरंजन"]):
         return "Entertainment"
     return "National"
 
+
 def scrape_news_article(url):
     logging.info(f"🔄 Processing Source URL: {url[:60]}...")
-    
+
+    now_ist = ist_now()
     data = {
         "title": "",
         "image": "",
         "content": "",
         "category": "National",
         "source_url": url,
-        "published_date": datetime.now(timezone.utc).strftime("%d %B %Y"),
+        "published_date": ist_date_hi(now_ist),   # जैसे: 02 अक्टूबर 2026
+        "published_time": now_ist.strftime("%I:%M %p") + " IST",
+        "published_iso": now_ist.isoformat(),
     }
-    
+
     session = requests.Session()
     session.headers.update(HEADERS)
-    
+
     res = None
     for attempt in range(3):
         try:
@@ -89,13 +121,13 @@ def scrape_news_article(url):
 
     try:
         soup = BeautifulSoup(res.content, "html.parser")
-        
+
         # Title Extraction
         title_elem = soup.find("h1") or soup.find("meta", {"property": "og:title"}) or soup.find("title")
         if title_elem:
             data["title"] = title_elem.get("content", "").strip() if title_elem.name == "meta" else title_elem.get_text().strip()
             data["title"] = re.sub(r"\s*[-|]\s*(NDTV|AajTak|Jagran|News18|AmarUjala|Dainik).*$", "", data["title"], flags=re.IGNORECASE)
-        
+
         if not data["title"]:
             return None
 
@@ -108,11 +140,11 @@ def scrape_news_article(url):
 
         # Content Extraction
         content_selectors = [
-            "article", ".article-content", ".story-content", ".detail-content", 
-            ".news-content", ".content-area", ".main-content", ".article-body", 
+            "article", ".article-content", ".story-content", ".detail-content",
+            ".news-content", ".content-area", ".main-content", ".article-body",
             ".post-content", ".entry-content", "#articleBody", "#storyContent"
         ]
-        
+
         full_content = ""
         for selector in content_selectors:
             content_elem = soup.select_one(selector)
@@ -125,20 +157,21 @@ def scrape_news_article(url):
                     if content_parts:
                         full_content = "\n\n".join(content_parts[:25])
                         break
-        
+
         if not full_content:
             all_paragraphs = soup.find_all("p")
             content_parts = [p.get_text().strip() for p in all_paragraphs if len(p.get_text().strip()) > 35]
             if content_parts:
                 full_content = "\n\n".join(content_parts[:15])
-        
+
         data["content"] = full_content
-        
+
     except Exception as e:
         logging.error(f"⚠️ Scraping Error: {e}")
         return None
 
     return data
+
 
 # ================= 3. ENHANCED SEO & AI GENERATOR =================
 def get_ai_response(prompt):
@@ -147,7 +180,7 @@ def get_ai_response(prompt):
         try:
             time.sleep(1)
             res = client.chat.completions.create(
-                model=model_name, 
+                model=model_name,
                 messages=[{"role": "user", "content": prompt}]
             )
             content = res.choices[0].message.content
@@ -158,11 +191,12 @@ def get_ai_response(prompt):
             continue
     return ""
 
+
 def generate_seo_content_hinglish(news_data):
     title = news_data["title"]
     content = news_data["content"]
     source_url = news_data["source_url"]
-    
+
     prompt = f"""
     तुम एक Professional Hindi SEO News Editor और Google News Expert हो।
     दिए गए न्यूज आर्टिकल को बिना तथ्य बदले Google Search, Google News और Google Discover के लिए पूरी तरह SEO Optimized JSON Structure में लिखो।
@@ -192,32 +226,49 @@ def generate_seo_content_hinglish(news_data):
         "tags": ["Tag1", "Tag2", "Tag3", "Tag4", "Tag5"]
     }}
     """
-    
+
     raw_response = get_ai_response(prompt)
-    
+
+    # Structured fallback (agar AI ka JSON kharab ya adhura ho)
+    cat_fallback = fallback_category_detection(f"{title} {content}")
+    fallback_slug = re.sub(r"[^\w\s-]", "", title.lower()).strip().replace(" ", "-")[:50]
+    fallback_data = {
+        "seo_title": title[:65],
+        "meta_description": f"{title[:140]}... पूरा विवरण पढ़ें।",
+        "url_slug": fallback_slug or f"news-{int(time.time())}",
+        "focus_keyword": title.split()[0] if title.split() else "News",
+        "related_keywords": ["Breaking News", "Latest Update"],
+        "short_summary": f"<p>{title}</p>",
+        "quick_summary": [title],
+        "featured_snippet": title[:60],
+        "article_body": f"<h2>मुख्य समाचार</h2><p>{content}</p>",
+        "faqs": [],
+        "category": cat_fallback,
+        "tags": ["News", "Updates"],
+    }
+
     try:
-        ai_data = json.loads(raw_response)
+        parsed = json.loads(raw_response)
+        if not isinstance(parsed, dict):
+            parsed = {}
     except Exception:
-        # Structured Fallback Logic
-        cat_fallback = fallback_category_detection(f"{title} {content}")
-        ai_data = {
-            "seo_title": title[:65],
-            "meta_description": f"{title[:140]}... पूरा विवरण पढ़ें।",
-            "url_slug": re.sub(r"[^\w\s-]", "", title.lower()).replace(" ", "-")[:50],
-            "focus_keyword": title.split()[0],
-            "related_keywords": ["Breaking News", "Latest Update"],
-            "short_summary": f"<p>{title}</p>",
-            "quick_summary": [title],
-            "featured_snippet": title[:60],
-            "article_body": f"<h2>मुख्य समाचार</h2><p>{content}</p>",
-            "faqs": [],
-            "category": cat_fallback,
-            "tags": ["News", "Updates"]
-        }
+        parsed = {}
+
+    # AI ke khali/missing fields fallback se bhar jaate hain (KeyError nahi aayega)
+    ai_data = {**fallback_data, **{k: v for k, v in parsed.items() if v}}
+
+    valid_categories = ["Politics", "Sports", "Tech", "Jobs", "Business", "Entertainment", "National"]
+    if ai_data.get("category") not in valid_categories:
+        ai_data["category"] = cat_fallback
+
+    faqs = [
+        f for f in ai_data.get("faqs", [])
+        if isinstance(f, dict) and f.get("question") and f.get("answer")
+    ]
 
     # Generate Google FAQ Schema (JSON-LD)
     faq_schema = ""
-    if ai_data.get("faqs"):
+    if faqs:
         schema_dict = {
             "@context": "https://schema.org",
             "@type": "FAQPage",
@@ -229,16 +280,16 @@ def generate_seo_content_hinglish(news_data):
                         "@type": "Answer",
                         "text": item["answer"]
                     }
-                } for item in ai_data["faqs"]
+                } for item in faqs
             ]
         }
         faq_schema = f'<script type="application/ld+json">\n{json.dumps(schema_dict, ensure_ascii=False, indent=2)}\n</script>'
 
     # Construct Clean HTML Code for Rendering
     quick_bullets = "".join([f"<li>{item}</li>" for item in ai_data.get("quick_summary", [])])
-    
+
     faq_html_list = ""
-    for faq in ai_data.get("faqs", []):
+    for faq in faqs:
         faq_html_list += f"<h4>Q: {faq['question']}</h4><p>A: {faq['answer']}</p>"
 
     final_html = f"""
@@ -281,24 +332,29 @@ def generate_seo_content_hinglish(news_data):
         "tags": ai_data.get("tags", [])
     }
 
+
 # ================= 4. SITEMAP & ROBOTS GENERATORS =================
 def generate_sitemap_xml(news_list):
     urlset = ET.Element("urlset", xmlns="http://www.sitemaps.org/schemas/sitemap/0.9")
-    
+
+    today_ist = ist_now().strftime("%Y-%m-%d")
+
     u_node = ET.SubElement(urlset, "url")
     ET.SubElement(u_node, "loc").text = f"{SITE_BASE_URL}/"
-    ET.SubElement(u_node, "lastmod").text = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ET.SubElement(u_node, "lastmod").text = today_ist
     ET.SubElement(u_node, "changefreq").text = "always"
     ET.SubElement(u_node, "priority").text = "1.0"
 
     for item in news_list[:100]:
         node = ET.SubElement(urlset, "url")
         ET.SubElement(node, "loc").text = f"{SITE_BASE_URL}/article.html?id={item['id']}"
-        ET.SubElement(node, "lastmod").text = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Har khabar ki apni asli tarikh (purani khabron me 'published' na ho to aaj ki)
+        ET.SubElement(node, "lastmod").text = (item.get("published") or today_ist)[:10]
         ET.SubElement(node, "changefreq").text = "weekly"
         ET.SubElement(node, "priority").text = "0.8"
 
     return ET.tostring(urlset, encoding="utf-8", method="xml").decode("utf-8")
+
 
 def generate_robots_txt():
     return f"""User-agent: *
@@ -306,6 +362,7 @@ Allow: /
 
 Sitemap: {SITE_BASE_URL}/sitemap.xml
 """
+
 
 # ================= 5. PUBLISH TO GITHUB =================
 def publish_to_github_batch(seo_data, news_data):
@@ -319,7 +376,7 @@ def publish_to_github_batch(seo_data, news_data):
         repo = g.get_repo(REPO_NAME)
 
         json_file_path = "data/news.json"
-        
+
         try:
             file_content = repo.get_contents(json_file_path)
             existing_data = json.loads(file_content.decoded_content.decode("utf-8"))
@@ -346,6 +403,8 @@ def publish_to_github_batch(seo_data, news_data):
             "content": seo_data["article_html"],
             "author": "SG News Team",
             "date": news_data["published_date"],
+            "time": news_data["published_time"],
+            "published": news_data["published_iso"],
             "category": seo_data["category"],
             "image": news_data["image"],
             "image_alt": img_alt_text,
@@ -393,6 +452,7 @@ def publish_to_github_batch(seo_data, news_data):
         logging.error(f"❌ GitHub Batch Commit Error: {e}")
         return None
 
+
 # ================= 6. TELEGRAM POSTING =================
 async def send_telegram_post(news_data, seo_data, post_url):
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
@@ -401,6 +461,7 @@ async def send_telegram_post(news_data, seo_data, post_url):
     caption = f"""📰 <b>{seo_data['seo_title']}</b>
 
 📂 <b>श्रेणी:</b> #{seo_data['category']}
+📅 <b>प्रकाशित:</b> {news_data['published_date']}, {news_data['published_time']}
 📖 <b>पूरी रिपोर्ट:</b> {post_url}"""
 
     temp_img_path = f"temp_tg_{int(time.time())}.jpg"
@@ -431,6 +492,7 @@ async def send_telegram_post(news_data, seo_data, post_url):
     except Exception as e:
         logging.error(f"❌ Telegram Bot Error: {e}")
 
+
 # ================= 7. MAIN PROCESS =================
 async def process_news(url):
     news_data = scrape_news_article(url)
@@ -442,11 +504,12 @@ async def process_news(url):
         return None
 
     post_url = publish_to_github_batch(seo_data, news_data)
-    
+
     if post_url:
         await send_telegram_post(news_data, seo_data, post_url)
-    
+
     return post_url
+
 
 async def _notify_telegram_plain(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -470,7 +533,7 @@ async def main():
         input_urls = input("\n🔗 News URL(s) - Space separated: ").strip()
 
     urls_list = [u.strip() for u in re.split(r"[\s,]+", input_urls) if u.strip().startswith("http")]
-    
+
     if not urls_list:
         logging.error("❌ कोई वैध URL नहीं मिला।")
         await _notify_telegram_plain("⚠️ Koi valid news URL provide nahi hui.")
@@ -494,6 +557,7 @@ async def main():
 
     if not any_success:
         await _notify_telegram_plain("⚠️ Kisi bhi URL se news publish nahi ho payi.")
+
 
 if __name__ == "__main__":
     try:
