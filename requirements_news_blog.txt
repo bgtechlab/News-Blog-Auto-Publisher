@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+g4f
+PyGithub
+python-telegram-bot
+urllib3
