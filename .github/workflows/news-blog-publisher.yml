@@ -1,0 +1,32 @@
+name: News Blog Auto Publisher
+
+on:
+  workflow_dispatch:
+    inputs:
+      news_urls:
+        description: "News source URL(s) — space ya comma se separate karke"
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python deps install
+        run: pip install -r requirements.txt
+
+      - name: News article banao aur site repo me publish karo
+        env:
+          NEWS_URLS: ${{ inputs.news_urls }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_REPO: "bgnewswab/sgnewswab"
+          SITE_BASE_URL: "https://bgnewswab.github.io/sgnewswab"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python news_blog_automation.py
