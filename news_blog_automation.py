@@ -380,7 +380,14 @@ def publish_to_github_batch(seo_data, news_data):
 
         try:
             file_content = repo.get_contents(json_file_path, ref="main")
-            existing_data = json.loads(file_content.decoded_content.decode("utf-8"))
+            # GitHub Contents API may return encoding="none" for large files.
+            # In that case ContentFile.decoded_content cannot be used; read the blob directly.
+            if getattr(file_content, "encoding", None) == "base64":
+                raw_json = file_content.decoded_content
+            else:
+                logging.info("ℹ️ data/news.json returned encoding=%s; reading Git blob directly.", getattr(file_content, "encoding", None))
+                raw_json = repo.get_git_blob(file_content.sha).decoded_content
+            existing_data = json.loads(raw_json.decode("utf-8"))
             file_sha = file_content.sha
         except UnknownObjectException as e:
             if getattr(e, "status", None) != 404:
