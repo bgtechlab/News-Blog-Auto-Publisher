@@ -16,6 +16,12 @@ from telegram import Bot
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+LAST_FAILURE = {"stage": "", "reason": ""}
+
+def fail(stage, reason):
+    LAST_FAILURE["stage"] = stage
+    LAST_FAILURE["reason"] = str(reason)[:700]
+    logging.error(f"❌ {stage}: {reason}")
 
 # ================= 0. IST DATE / TIME HELPERS =================
 # GitHub Actions UTC me chalta hai, isliye hamesha IST (UTC+5:30) use karo.
@@ -549,7 +555,11 @@ async def main():
                 logging.info(f"✅ Completed: {post_url}")
                 any_success = True
             else:
-                await _notify_telegram_plain(f"❌ Process fail ho gaya (scrape/AI/publish).\n🔗 {url}")
+                stage = LAST_FAILURE.get("stage") or "UNKNOWN"
+                reason = LAST_FAILURE.get("reason") or "Unknown failure"
+                await _notify_telegram_plain(
+                    f"❌ <b>News publish failed</b>\n📍 <b>Stage:</b> {stage}\n📝 <b>Reason:</b> {reason}\n🔗 {url}"
+                )
             await asyncio.sleep(5)
         except Exception as e:
             logging.error(f"❌ Error processing {url}: {e}")
