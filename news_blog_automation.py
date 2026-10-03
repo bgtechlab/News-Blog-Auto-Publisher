@@ -12,6 +12,7 @@ import urllib3
 from bs4 import BeautifulSoup
 from g4f.client import Client
 from github import Auth, Github
+from github.GithubException import UnknownObjectException, GithubException
 from telegram import Bot
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
