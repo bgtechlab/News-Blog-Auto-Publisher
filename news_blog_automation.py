@@ -379,12 +379,19 @@ def publish_to_github_batch(seo_data, news_data):
         json_file_path = "data/news.json"
 
         try:
-            file_content = repo.get_contents(json_file_path)
+            file_content = repo.get_contents(json_file_path, ref="main")
             existing_data = json.loads(file_content.decoded_content.decode("utf-8"))
             file_sha = file_content.sha
-        except Exception:
+        except UnknownObjectException as e:
+            if getattr(e, "status", None) != 404:
+                raise
+            logging.warning(f"ℹ️ {json_file_path} does not exist; creating it.")
             existing_data = []
             file_sha = None
+        except Exception:
+            logging.exception(f"❌ Cannot read {json_file_path}; not treating it as missing.")
+            raise
+
 
         for article in existing_data:
             if article.get("source_url") == news_data["source_url"] or article.get("slug") == seo_data["url_slug"]:
@@ -430,28 +437,43 @@ def publish_to_github_batch(seo_data, news_data):
         published_url = f"{SITE_BASE_URL}/article.html?id={new_id}"
 
         if file_sha:
-            repo.update_file(json_file_path, f"Auto Publish ID {new_id}: {seo_data['seo_title']}", updated_json_str, file_sha, branch="main")
+            try:
+                latest_file = repo.get_contents(json_file_path, ref="main")
+                repo.update_file(json_file_path, f"Auto Publish ID {new_id}: {seo_data['seo_title']}", updated_json_str, latest_file.sha, branch="main")
+            except GithubException as e:
+                if getattr(e, "status", None) == 422:
+                    latest_file = repo.get_contents(json_file_path, ref="main")
+                    repo.update_file(json_file_path, f"Auto Publish ID {new_id}: {seo_data['seo_title']} (retry)", updated_json_str, latest_file.sha, branch="main")
+                else:
+                    raise
         else:
             repo.create_file(json_file_path, f"Auto Create ID {new_id}: {seo_data['seo_title']}", updated_json_str, branch="main")
 
-        try:
-            r_file = repo.get_contents("robots.txt")
-            repo.update_file("robots.txt", "Auto Update robots.txt", generate_robots_txt(), r_file.sha, branch="main")
-        except Exception:
-            repo.create_file("robots.txt", "Auto Create robots.txt", generate_robots_txt(), branch="main")
 
         try:
-            s_file = repo.get_contents("sitemap.xml")
+            r_file = repo.get_contents("robots.txt", ref="main")
+            repo.update_file("robots.txt", "Auto Update robots.txt", generate_robots_txt(), r_file.sha, branch="main")
+        except UnknownObjectException as e:
+            if getattr(e, "status", None) != 404:
+                raise
+            repo.create_file("robots.txt", "Auto Create robots.txt", generate_robots_txt(), branch="main")
+
+
+        try:
+            s_file = repo.get_contents("sitemap.xml", ref="main")
             repo.update_file("sitemap.xml", "Auto Update sitemap.xml", generate_sitemap_xml(existing_data), s_file.sha, branch="main")
-        except Exception:
+        except UnknownObjectException as e:
+            if getattr(e, "status", None) != 404:
+                raise
             repo.create_file("sitemap.xml", "Auto Create sitemap.xml", generate_sitemap_xml(existing_data), branch="main")
+
 
         logging.info(f"✅ पब्लिश सफल! URL: {published_url}")
         return published_url
 
     except Exception as e:
-        logging.error(f"❌ GitHub Batch Commit Error: {e}")
-        return None
+        logging.exception(f"❌ GitHub Batch Commit Error: {e}")
+        raise
 
 
 # ================= 6. TELEGRAM POSTING =================
@@ -498,13 +520,15 @@ async def send_telegram_post(news_data, seo_data, post_url):
 async def process_news(url):
     news_data = scrape_news_article(url)
     if not news_data:
-        return None
+        raise RuntimeError("Scrape failed: article data extract nahi hua.")
 
     seo_data = generate_seo_content_hinglish(news_data)
     if not seo_data:
-        return None
+        raise RuntimeError("AI generation failed: valid SEO response nahi mila.")
 
     post_url = publish_to_github_batch(seo_data, news_data)
+    if not post_url:
+        raise RuntimeError("Publish failed: GitHub URL return nahi hua.")
 
     if post_url:
         await send_telegram_post(news_data, seo_data, post_url)
@@ -546,15 +570,15 @@ async def main():
     for url in urls_list:
         try:
             post_url = await process_news(url)
-            if post_url:
-                logging.info(f"✅ Completed: {post_url}")
-                any_success = True
-            else:
-                await _notify_telegram_plain(f"❌ Process fail ho gaya (scrape/AI/publish).\n🔗 {url}")
-            await asyncio.sleep(5)
+            logging.info(f"✅ Completed: {post_url}")
+            any_success = True
         except Exception as e:
-            logging.error(f"❌ Error processing {url}: {e}")
-            await _notify_telegram_plain(f"❌ Error processing:\n🔗 {url}\n<code>{e}</code>")
+            logging.exception(f"❌ Error processing {url}")
+            await _notify_telegram_plain(
+                f"❌ Process fail ho gaya.\n🔗 {url}\n\n"
+                f"<b>Exact error:</b> <code>{str(e)[:1200]}</code>"
+            )
+        await asyncio.sleep(5)
 
     if not any_success:
         await _notify_telegram_plain("⚠️ Kisi bhi URL se news publish nahi ho payi.")
