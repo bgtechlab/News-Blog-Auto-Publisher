@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
+import base64
 import json
 import logging
 import os
@@ -386,7 +387,7 @@ def publish_to_github_batch(seo_data, news_data):
                 raw_json = file_content.decoded_content
             else:
                 logging.info("ℹ️ data/news.json returned encoding=%s; reading Git blob directly.", getattr(file_content, "encoding", None))
-                raw_json = repo.get_git_blob(file_content.sha).decoded_content
+                blob = repo.get_git_blob(file_content.sha)\n                # PyGithub GitBlob exposes base64 text in .content, not .decoded_content.\n                raw_json = base64.b64decode(blob.content)
             existing_data = json.loads(raw_json.decode("utf-8"))
             file_sha = file_content.sha
         except UnknownObjectException as e:
