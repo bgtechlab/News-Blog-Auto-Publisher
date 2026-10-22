@@ -92,7 +92,7 @@ def fallback_category_detection(text):
 def _jsonld_articles(soup):
     """JSON-LD blocks se Article/NewsArticle metadata collect karo."""
     found = []
-    for script in soup.find_all("script", attrs={"type": re.compile(r"application/ld\\+json", re.I)}):
+    for script in soup.find_all("script", attrs={"type": re.compile(r"application/ld\+json", re.I)}):
         raw = script.string or script.get_text()
         if not raw:
             continue
