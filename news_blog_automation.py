@@ -224,7 +224,7 @@ def _find_alternative_news_urls(url, limit=5):
     """Cricinfo 403 hone par Google News RSS se same match/topic ki doosri publisher links dhoondo."""
     try:
         path_words = urlparse(url).path.strip("/").split("/")
-        slug = path_words[-1] if path_words else ""
+        slug = path_words[-2] if len(path_words) > 1 and path_words[-1].lower() in ("match-report", "match-details", "scorecard") else (path_words[-1] if path_words else "")
         # Match IDs and generic suffixes search query ko noisy na banayein.
         query = re.sub(r"-\\d{5,}", " ", slug)
         query = re.sub(r"[-_]+", " ", query)
