@@ -4,3 +4,4 @@ g4f
 PyGithub
 python-telegram-bot
 urllib3
+playwright
