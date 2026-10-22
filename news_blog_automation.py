@@ -90,6 +90,35 @@ def fallback_category_detection(text):
     return "National"
 
 
+def _fetch_rendered_html(url):
+    """JavaScript-heavy publisher pages ko headless Chromium se load karne ka optional fallback."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = browser.new_page(
+                user_agent=HEADERS["User-Agent"],
+                locale="hi-IN",
+                extra_http_headers={"Accept-Language": "hi,en-US;q=0.9,en;q=0.8"}
+            )
+            response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2500)
+            html = page.content()
+            status = response.status if response else None
+            browser.close()
+            logging.info("Rendered browser fetch status=%s, html_chars=%s", status, len(html))
+            # CAPTCHA/denial page ko article samajh kar use na karein.
+            if len(html) > 1500 and not re.search(r"access denied|verify you are human|captcha", html, re.I):
+                return html
+    except Exception as e:
+        logging.warning("Rendered browser fallback failed: %s", e)
+    return ""
+
+
 def _jsonld_articles(soup):
     """JSON-LD blocks se Article/NewsArticle metadata collect karo."""
     found = []
@@ -187,22 +216,31 @@ def scrape_news_article(url):
     }
 
     res = None
-    for attempt in range(3):
-        try:
-            res = session.get(url, timeout=20)
-            if res.status_code == 200:
-                break
-            logging.warning("Scrape HTTP status %s (attempt %s)", res.status_code, attempt + 1)
-        except Exception as e:
-            logging.warning(f"⚠️ Scraping attempt {attempt + 1} failed: {e}")
-            time.sleep(2)
+    rendered_html = ""
 
-    if not res or res.status_code != 200:
-        logging.error("❌ Website inaccessible via HTTP request.")
+    # Cricinfo ka article HTML kabhi anti-bot/JS ke peeche hota hai.
+    # Browser fallback pehle try karo; agar na chale to regular requests use honge.
+    if _is_cricinfo_url(url):
+        rendered_html = _fetch_rendered_html(url)
+
+    if not rendered_html:
+        for attempt in range(3):
+            try:
+                res = session.get(url, timeout=25)
+                if res.status_code == 200:
+                    break
+                logging.warning("Scrape HTTP status %s (attempt %s)", res.status_code, attempt + 1)
+            except Exception as e:
+                logging.warning(f"⚠️ Scraping attempt {attempt + 1} failed: {e}")
+                time.sleep(2)
+
+    if not rendered_html and (not res or res.status_code != 200):
+        logging.error("❌ Website inaccessible via HTTP and browser fallback.")
         return None
 
     try:
-        soup = BeautifulSoup(res.content, "html.parser")
+        html_source = rendered_html if rendered_html else res.content
+        soup = BeautifulSoup(html_source, "html.parser")
         structured = _jsonld_articles(soup)
         article_meta = structured[0] if structured else {}
 
@@ -272,12 +310,40 @@ def scrape_news_article(url):
                     paragraphs.append(text)
             full_content = "\n\n".join(paragraphs[:20])
 
-        if not data["title"]:
-            logging.error("Article title extraction failed for %s", url)
-            return None
-        if not full_content.strip():
-            logging.error("Article body extraction failed for %s", url)
-            return None
+        if not data["title"] or not full_content.strip():
+            logging.warning("Initial extraction incomplete (title=%s, content_chars=%s); retrying with rendered browser HTML.",
+                bool(data["title"]), len(full_content.strip()))
+            retry_html = _fetch_rendered_html(url) if _is_cricinfo_url(url) and not rendered_html else ""
+            if retry_html:
+                retry_soup = BeautifulSoup(retry_html, "html.parser")
+                retry_structured = _jsonld_articles(retry_soup)
+                retry_meta = retry_structured[0] if retry_structured else {}
+                if not data["title"]:
+                    retry_title = retry_meta.get("headline") or retry_meta.get("name") or _meta_content(retry_soup, "og:title", "twitter:title")
+                    if not retry_title and retry_soup.find("h1"):
+                        retry_title = retry_soup.find("h1").get_text(" ", strip=True)
+                    if retry_title:
+                        data["title"] = re.sub(r"\\s+", " ", str(retry_title)).strip()
+                if not data["image"] or data["image"] == DEFAULT_FALLBACK_IMAGE:
+                    retry_image = retry_meta.get("image", "")
+                    if isinstance(retry_image, dict):
+                        retry_image = retry_image.get("url") or retry_image.get("contentUrl") or ""
+                    if isinstance(retry_image, list):
+                        retry_image = next((x for x in retry_image if isinstance(x, str)), "")
+                    data["image"] = retry_image or _meta_content(retry_soup, "og:image", "twitter:image") or data["image"]
+                if len(full_content.strip()) < 120:
+                    retry_parts = [re.sub(r"\\s+", " ", p.get_text(" ", strip=True)).strip()
+                                   for p in retry_soup.find_all("p")]
+                    retry_parts = [p for p in retry_parts if len(p) > 45]
+                    full_content = "\\n\\n".join(retry_parts[:25]) or str(retry_meta.get("articleBody") or "")
+            if not data["title"]:
+                logging.error("Article title extraction failed. URL=%s, HTTP_status=%s, rendered=%s",
+                              url, getattr(res, "status_code", None), bool(rendered_html or retry_html))
+                return None
+            if len(full_content.strip()) < 80:
+                logging.error("Article body extraction failed. URL=%s, title=%r, content_chars=%s, HTTP_status=%s, rendered=%s",
+                              url, data["title"], len(full_content.strip()), getattr(res, "status_code", None), bool(rendered_html or retry_html))
+                return None
 
         data["content"] = full_content.strip()
         data["category"] = "Sports" if _is_cricinfo_url(url) else fallback_category_detection(f"{data['title']} {data['content']}")
