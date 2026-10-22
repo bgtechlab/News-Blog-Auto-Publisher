@@ -323,7 +323,7 @@ def scrape_news_article(url):
                     if not retry_title and retry_soup.find("h1"):
                         retry_title = retry_soup.find("h1").get_text(" ", strip=True)
                     if retry_title:
-                        data["title"] = re.sub(r"\\s+", " ", str(retry_title)).strip()
+                        data["title"] = re.sub(r"\s+", " ", str(retry_title)).strip()
                 if not data["image"] or data["image"] == DEFAULT_FALLBACK_IMAGE:
                     retry_image = retry_meta.get("image", "")
                     if isinstance(retry_image, dict):
@@ -332,10 +332,10 @@ def scrape_news_article(url):
                         retry_image = next((x for x in retry_image if isinstance(x, str)), "")
                     data["image"] = retry_image or _meta_content(retry_soup, "og:image", "twitter:image") or data["image"]
                 if len(full_content.strip()) < 120:
-                    retry_parts = [re.sub(r"\\s+", " ", p.get_text(" ", strip=True)).strip()
+                    retry_parts = [re.sub(r"\s+", " ", p.get_text(" ", strip=True)).strip()
                                    for p in retry_soup.find_all("p")]
                     retry_parts = [p for p in retry_parts if len(p) > 45]
-                    full_content = "\\n\\n".join(retry_parts[:25]) or str(retry_meta.get("articleBody") or "")
+                    full_content = "\n\n".join(retry_parts[:25]) or str(retry_meta.get("articleBody") or "")
             if not data["title"]:
                 logging.error("Article title extraction failed. URL=%s, HTTP_status=%s, rendered=%s",
                               url, getattr(res, "status_code", None), bool(rendered_html or retry_html))
