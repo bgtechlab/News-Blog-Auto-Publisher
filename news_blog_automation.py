@@ -226,10 +226,10 @@ def _find_alternative_news_urls(url, limit=5):
         path_words = urlparse(url).path.strip("/").split("/")
         slug = path_words[-2] if len(path_words) > 1 and path_words[-1].lower() in ("match-report", "match-details", "scorecard") else (path_words[-1] if path_words else "")
         # Match IDs and generic suffixes search query ko noisy na banayein.
-        query = re.sub(r"-\\d{5,}", " ", slug)
+        query = re.sub(r"-\d{5,}", " ", slug)
         query = re.sub(r"[-_]+", " ", query)
-        query = re.sub(r"\\b(match report|match details|scorecard)\\b", " ", query, flags=re.I)
-        query = re.sub(r"\\s+", " ", query).strip()
+        query = re.sub(r"\b(match report|match details|scorecard)\b", " ", query, flags=re.I)
+        query = re.sub(r"\s+", " ", query).strip()
         if not query:
             return []
         rss_url = "https://news.google.com/rss/search?q=" + requests.utils.quote(query + " cricket", safe="") + "&hl=en-IN&gl=IN&ceid=IN:en"
