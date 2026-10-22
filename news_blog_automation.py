@@ -89,30 +89,106 @@ def fallback_category_detection(text):
     return "National"
 
 
+def _jsonld_articles(soup):
+    """JSON-LD blocks se Article/NewsArticle metadata collect karo."""
+    found = []
+    for script in soup.find_all("script", attrs={"type": re.compile(r"application/ld\\+json", re.I)}):
+        raw = script.string or script.get_text()
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw.strip())
+        except Exception:
+            continue
+        stack = parsed if isinstance(parsed, list) else [parsed]
+        while stack:
+            item = stack.pop(0)
+            if isinstance(item, list):
+                stack.extend(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("@graph"), list):
+                    stack.extend(item["@graph"])
+                typ = item.get("@type", [])
+                if isinstance(typ, str):
+                    typ = [typ]
+                if any(t in ("Article", "NewsArticle", "ReportageNewsArticle", "BlogPosting") for t in typ):
+                    found.append(item)
+    return found
+
+
+def _meta_content(soup, *keys):
+    for key in keys:
+        tag = (soup.find("meta", attrs={"property": key}) or
+               soup.find("meta", attrs={"name": key}))
+        if tag and tag.get("content"):
+            value = tag.get("content").strip()
+            if value:
+                return value
+    return ""
+
+
+def _is_cricinfo_url(url):
+    try:
+        host = requests.utils.urlparse(url).netloc.lower().split(":")[0]
+        return host == "cricinfo.com" or host.endswith(".cricinfo.com") or host == "espncricinfo.com" or host.endswith(".espncricinfo.com")
+    except Exception:
+        return False
+
+
+def _resolve_cricinfo_homepage(url, session):
+    """Homepage/section URL diya ho to usme se pehla actual Hindi story URL choose karo."""
+    parsed = requests.utils.urlparse(url)
+    path = parsed.path.rstrip("/")
+    if not _is_cricinfo_url(url) or path not in ("/hindi", ""):
+        return url
+    try:
+        response = session.get(url, timeout=20)
+        if response.status_code != 200:
+            logging.warning("Cricinfo homepage HTTP status: %s", response.status_code)
+            return url
+        soup = BeautifulSoup(response.content, "html.parser")
+        for anchor in soup.select('a[href*="/hindi/story/"]'):
+            href = (anchor.get("href") or "").strip()
+            if not href:
+                continue
+            story_url = requests.compat.urljoin(response.url, href).split("#")[0]
+            story_path = requests.utils.urlparse(story_url).path
+            if "/hindi/story/" in story_path and story_path.rstrip("/") != "/hindi/story":
+                logging.info("🏏 Cricinfo homepage se latest story mili: %s", story_url)
+                return story_url
+    except Exception as e:
+        logging.warning("Cricinfo homepage story discovery failed: %s", e)
+    return url
+
+
 def scrape_news_article(url):
-    logging.info(f"🔄 Processing Source URL: {url[:60]}...")
+    logging.info(f"🔄 Processing Source URL: {url[:100]}...")
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # User homepage URL de sakta hai; Cricinfo Hindi homepage se actual story choose karo.
+    url = _resolve_cricinfo_homepage(url, session)
 
     now_ist = ist_now()
     data = {
         "title": "",
         "image": "",
         "content": "",
-        "category": "National",
+        "category": "Sports" if _is_cricinfo_url(url) else "National",
         "source_url": url,
-        "published_date": ist_date_hi(now_ist),   # जैसे: 02 अक्टूबर 2026
+        "published_date": ist_date_hi(now_ist),
         "published_time": now_ist.strftime("%I:%M %p") + " IST",
         "published_iso": now_ist.isoformat(),
     }
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
     res = None
     for attempt in range(3):
         try:
-            res = session.get(url, timeout=15, verify=False)
+            res = session.get(url, timeout=20)
             if res.status_code == 200:
                 break
+            logging.warning("Scrape HTTP status %s (attempt %s)", res.status_code, attempt + 1)
         except Exception as e:
             logging.warning(f"⚠️ Scraping attempt {attempt + 1} failed: {e}")
             time.sleep(2)
@@ -123,53 +199,88 @@ def scrape_news_article(url):
 
     try:
         soup = BeautifulSoup(res.content, "html.parser")
+        structured = _jsonld_articles(soup)
+        article_meta = structured[0] if structured else {}
 
-        # Title Extraction
-        title_elem = soup.find("h1") or soup.find("meta", {"property": "og:title"}) or soup.find("title")
-        if title_elem:
-            data["title"] = title_elem.get("content", "").strip() if title_elem.name == "meta" else title_elem.get_text().strip()
-            data["title"] = re.sub(r"\s*[-|]\s*(NDTV|AajTak|Jagran|News18|AmarUjala|Dainik).*$", "", data["title"], flags=re.IGNORECASE)
-
-        if not data["title"]:
-            return None
-
-        # Image Extraction
-        img_elem = soup.find("meta", {"property": "og:image"}) or soup.find("meta", {"name": "twitter:image"})
-        if img_elem and img_elem.get("content", "").startswith("http"):
-            data["image"] = img_elem.get("content", "")
-        else:
-            data["image"] = DEFAULT_FALLBACK_IMAGE
-
-        # Content Extraction
-        content_selectors = [
-            "article", ".article-content", ".story-content", ".detail-content",
-            ".news-content", ".content-area", ".main-content", ".article-body",
-            ".post-content", ".entry-content", "#articleBody", "#storyContent"
+        # Cricinfo pages can render story text in metadata / non-standard DOM;
+        # structured metadata and OpenGraph are tried before generic selectors.
+        title_candidates = [
+            article_meta.get("headline", ""),
+            article_meta.get("name", ""),
+            _meta_content(soup, "og:title", "twitter:title"),
+            (soup.find("h1").get_text(" ", strip=True) if soup.find("h1") else ""),
+            (soup.title.get_text(" ", strip=True) if soup.title else ""),
         ]
+        for candidate in title_candidates:
+            candidate = re.sub(r"\s+", " ", str(candidate or "")).strip()
+            candidate = re.sub(r"\s*[-|]\s*(NDTV|AajTak|Jagran|News18|AmarUjala|Dainik|ESPNcricinfo|Cricinfo).*$", "", candidate, flags=re.IGNORECASE)
+            if len(candidate) > 5:
+                data["title"] = candidate
+                break
 
+        img = article_meta.get("image", "")
+        if isinstance(img, list):
+            img = next((x for x in img if isinstance(x, str)), "")
+        if isinstance(img, dict):
+            img = img.get("url") or img.get("contentUrl") or ""
+        if not isinstance(img, str) or not img.startswith("http"):
+            img = _meta_content(soup, "og:image", "twitter:image")
+        data["image"] = img if isinstance(img, str) and img.startswith("http") else DEFAULT_FALLBACK_IMAGE
+
+        # First prefer publisher article containers, then known body selectors.
+        content_selectors = [
+            '[data-testid*="article"]', '[class*="StoryBody"]', '[class*="story-body"]',
+            '[class*="article-body"]', '[class*="ArticleBody"]', '[class*="content"]',
+            "article", ".article-content", ".story-content", ".detail-content",
+            ".news-content", ".main-content", ".post-content", ".entry-content",
+            "#articleBody", "#storyContent"
+        ]
         full_content = ""
         for selector in content_selectors:
             content_elem = soup.select_one(selector)
-            if content_elem:
-                for unwanted in content_elem.select("script, style, iframe, .social-share, .advertisement, .related-stories"):
-                    unwanted.decompose()
-                paragraphs = content_elem.find_all("p")
-                if paragraphs:
-                    content_parts = [p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 25]
-                    if content_parts:
-                        full_content = "\n\n".join(content_parts[:25])
-                        break
+            if not content_elem:
+                continue
+            for unwanted in content_elem.select("script, style, iframe, nav, footer, .social-share, .advertisement, .related-stories"):
+                unwanted.decompose()
+            content_parts = [
+                re.sub(r"\s+", " ", p.get_text(" ", strip=True)).strip()
+                for p in content_elem.find_all("p")
+            ]
+            content_parts = [p for p in content_parts if len(p) > 35]
+            candidate_text = "\n\n".join(content_parts[:30])
+            if len(candidate_text) > len(full_content):
+                full_content = candidate_text
+            if len(full_content) >= 250:
+                break
 
-        if not full_content:
-            all_paragraphs = soup.find_all("p")
-            content_parts = [p.get_text().strip() for p in all_paragraphs if len(p.get_text().strip()) > 35]
-            if content_parts:
-                full_content = "\n\n".join(content_parts[:15])
+        # Some publishers expose the story body directly in NewsArticle JSON-LD.
+        if len(full_content) < 120:
+            body = article_meta.get("articleBody") or article_meta.get("description") or ""
+            if isinstance(body, str) and len(body.strip()) > len(full_content):
+                full_content = body.strip()
 
-        data["content"] = full_content
+        # Last fallback: visible paragraphs, excluding menus and tiny fragments.
+        if len(full_content) < 120:
+            paragraphs = []
+            for p in soup.find_all("p"):
+                text = re.sub(r"\s+", " ", p.get_text(" ", strip=True)).strip()
+                if len(text) > 45 and text not in paragraphs:
+                    paragraphs.append(text)
+            full_content = "\n\n".join(paragraphs[:20])
+
+        if not data["title"]:
+            logging.error("Article title extraction failed for %s", url)
+            return None
+        if not full_content.strip():
+            logging.error("Article body extraction failed for %s", url)
+            return None
+
+        data["content"] = full_content.strip()
+        data["category"] = "Sports" if _is_cricinfo_url(url) else fallback_category_detection(f"{data['title']} {data['content']}")
+        logging.info("✅ Extracted article: title=%r, content_chars=%s", data["title"], len(data["content"]))
 
     except Exception as e:
-        logging.error(f"⚠️ Scraping Error: {e}")
+        logging.exception(f"⚠️ Scraping Error: {e}")
         return None
 
     return data
