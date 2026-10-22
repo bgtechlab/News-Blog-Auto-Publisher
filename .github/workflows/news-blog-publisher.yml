@@ -19,7 +19,9 @@ jobs:
           python-version: "3.11"
 
       - name: Python deps install
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
 
       - name: News article banao aur site repo me publish karo
         env:
