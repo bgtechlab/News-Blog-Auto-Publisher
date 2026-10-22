@@ -91,32 +91,60 @@ def fallback_category_detection(text):
 
 
 def _fetch_rendered_html(url):
-    """JavaScript-heavy publisher pages ko headless Chromium se load karne ka optional fallback."""
+    """JavaScript-heavy publisher pages ko headless Chromium se load karein.
+
+    scrape_news_article() async main loop ke andar synchronous chal raha hai.
+    Playwright Sync API ko usi event-loop thread mein chalane par error aata hai,
+    isliye active asyncio loop ho to browser fetch ko dedicated thread mein chalayein.
+    """
+    def _run_browser():
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+                try:
+                    page = browser.new_page(
+                        user_agent=HEADERS["User-Agent"],
+                        locale="hi-IN",
+                        extra_http_headers={"Accept-Language": "hi,en-US;q=0.9,en;q=0.8"}
+                    )
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(2500)
+                    html = page.content()
+                    status = response.status if response else None
+                    logging.info("Rendered browser fetch status=%s, html_chars=%s", status, len(html))
+                    # CAPTCHA/denial page ko article samajh kar use na karein.
+                    if len(html) > 1500 and not re.search(
+                        r"access denied|verify you are human|captcha", html, re.I
+                    ):
+                        return html
+                finally:
+                    browser.close()
+        except Exception as e:
+            logging.warning("Rendered browser fallback failed: %s", e)
+        return ""
+
     try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            page = browser.new_page(
-                user_agent=HEADERS["User-Agent"],
-                locale="hi-IN",
-                extra_http_headers={"Accept-Language": "hi,en-US;q=0.9,en;q=0.8"}
-            )
-            response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            page.wait_for_timeout(2500)
-            html = page.content()
-            status = response.status if response else None
-            browser.close()
-            logging.info("Rendered browser fetch status=%s, html_chars=%s", status, len(html))
-            # CAPTCHA/denial page ko article samajh kar use na karein.
-            if len(html) > 1500 and not re.search(r"access denied|verify you are human|captcha", html, re.I):
-                return html
-    except Exception as e:
-        logging.warning("Rendered browser fallback failed: %s", e)
-    return ""
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _run_browser()
+
+    # Sync Playwright ko running asyncio loop ke same thread mein na chalayein.
+    import threading
+    result = {"html": ""}
+    def _worker():
+        result["html"] = _run_browser()
+    worker = threading.Thread(target=_worker, name="playwright-rendered-fetch", daemon=True)
+    worker.start()
+    worker.join(timeout=65)
+    if worker.is_alive():
+        logging.warning("Rendered browser fallback timed out after 65 seconds.")
+        return ""
+    return result["html"]
 
 
 def _jsonld_articles(soup):
