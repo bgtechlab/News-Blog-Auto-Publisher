@@ -10,6 +10,7 @@ import time
 import xml.etree.ElementTree as ET
 import requests
 import urllib3
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from g4f.client import Client
 from github import Auth, Github
@@ -129,7 +130,7 @@ def _meta_content(soup, *keys):
 
 def _is_cricinfo_url(url):
     try:
-        host = requests.utils.urlparse(url).netloc.lower().split(":")[0]
+        host = urlparse(url).netloc.lower().split(":")[0]
         return host == "cricinfo.com" or host.endswith(".cricinfo.com") or host == "espncricinfo.com" or host.endswith(".espncricinfo.com")
     except Exception:
         return False
@@ -137,7 +138,7 @@ def _is_cricinfo_url(url):
 
 def _resolve_cricinfo_homepage(url, session):
     """Homepage/section URL diya ho to usme se pehla actual Hindi story URL choose karo."""
-    parsed = requests.utils.urlparse(url)
+    parsed = urlparse(url)
     path = parsed.path.rstrip("/")
     if not _is_cricinfo_url(url) or path not in ("/hindi", ""):
         return url
@@ -151,8 +152,8 @@ def _resolve_cricinfo_homepage(url, session):
             href = (anchor.get("href") or "").strip()
             if not href:
                 continue
-            story_url = requests.compat.urljoin(response.url, href).split("#")[0]
-            story_path = requests.utils.urlparse(story_url).path
+            story_url = urljoin(response.url, href).split("#")[0]
+            story_path = urlparse(story_url).path
             if "/hindi/story/" in story_path and story_path.rstrip("/") != "/hindi/story":
                 logging.info("🏏 Cricinfo homepage se latest story mili: %s", story_url)
                 return story_url
