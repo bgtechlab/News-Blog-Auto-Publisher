@@ -220,6 +220,50 @@ def _resolve_cricinfo_homepage(url, session):
     return None
 
 
+def _find_alternative_news_urls(url, limit=5):
+    """Cricinfo 403 hone par Google News RSS se same match/topic ki doosri publisher links dhoondo."""
+    try:
+        path_words = urlparse(url).path.strip("/").split("/")
+        slug = path_words[-1] if path_words else ""
+        # Match IDs and generic suffixes search query ko noisy na banayein.
+        query = re.sub(r"-\\d{5,}", " ", slug)
+        query = re.sub(r"[-_]+", " ", query)
+        query = re.sub(r"\\b(match report|match details|scorecard)\\b", " ", query, flags=re.I)
+        query = re.sub(r"\\s+", " ", query).strip()
+        if not query:
+            return []
+        rss_url = "https://news.google.com/rss/search?q=" + requests.utils.quote(query + " cricket", safe="") + "&hl=en-IN&gl=IN&ceid=IN:en"
+        response = requests.get(rss_url, headers=HEADERS, timeout=20)
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        candidates = []
+        seen = {url.rstrip("/")}
+        for item in root.findall(".//item"):
+            link = (item.findtext("link") or "").strip()
+            if not link:
+                continue
+            try:
+                resolved = requests.get(link, headers=HEADERS, timeout=15, allow_redirects=True, stream=True)
+                final_url = resolved.url.split("#")[0]
+                resolved.close()
+            except Exception:
+                final_url = link
+            host = urlparse(final_url).netloc.lower().split(":")[0]
+            if not final_url.startswith("http") or _is_cricinfo_url(final_url):
+                continue
+            if host.endswith("google.com") or host.endswith("google.co.in") or final_url.rstrip("/") in seen:
+                continue
+            seen.add(final_url.rstrip("/"))
+            candidates.append(final_url)
+            if len(candidates) >= limit:
+                break
+        logging.info("Alternative publisher candidates found: %s", len(candidates))
+        return candidates
+    except Exception as e:
+        logging.warning("Alternative source discovery failed: %s", e)
+        return []
+
+
 def scrape_news_article(url):
     logging.info(f"🔄 Processing Source URL: {url[:100]}...")
 
@@ -738,8 +782,25 @@ async def send_telegram_post(news_data, seo_data, post_url):
 # ================= 7. MAIN PROCESS =================
 async def process_news(url):
     news_data = scrape_news_article(url)
+
+    # Cricinfo frequently returns HTTP 403 in GitHub Actions. If that happens,
+    # discover accessible coverage of the same match/topic and clearly use that
+    # publisher's URL as the credited source instead of pretending it came from Cricinfo.
+    if not news_data and _is_cricinfo_url(url):
+        logging.warning("Cricinfo source failed; searching alternative publisher coverage.")
+        for alternative_url in _find_alternative_news_urls(url):
+            if _is_cricinfo_url(alternative_url):
+                continue
+            logging.info("Trying alternative source: %s", alternative_url)
+            alternative_data = scrape_news_article(alternative_url)
+            if alternative_data and alternative_data.get("title") and len(alternative_data.get("content", "").strip()) >= 80:
+                news_data = alternative_data
+                news_data["source_url"] = alternative_url
+                logging.info("Using alternative publisher source: %s", alternative_url)
+                break
+
     if not news_data:
-        raise RuntimeError("Scrape failed: article data extract nahi hua.")
+        raise RuntimeError("Scrape failed: Cricinfo HTTP 403/blocked and no accessible alternative article could be extracted.")
 
     seo_data = generate_seo_content_hinglish(news_data)
     if not seo_data:
