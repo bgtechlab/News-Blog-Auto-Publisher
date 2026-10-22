@@ -159,7 +159,8 @@ def _resolve_cricinfo_homepage(url, session):
                 return story_url
     except Exception as e:
         logging.warning("Cricinfo homepage story discovery failed: %s", e)
-    return url
+    logging.warning("Cricinfo homepage par koi /hindi/story/ link nahi mila.")
+    return None
 
 
 def scrape_news_article(url):
@@ -170,6 +171,8 @@ def scrape_news_article(url):
 
     # User homepage URL de sakta hai; Cricinfo Hindi homepage se actual story choose karo.
     url = _resolve_cricinfo_homepage(url, session)
+    if not url:
+        return None
 
     now_ist = ist_now()
     data = {
