@@ -861,7 +861,10 @@ async def main():
         await asyncio.sleep(5)
 
     if not any_success:
-        await _notify_telegram_plain("⚠️ Kisi bhi URL se news publish nahi ho payi.")
+        await _notify_telegram_plain("⚠️ Kisi bhi URL se news publish nahi ho payi. GitHub Actions run ko failed mark kiya ja raha hai; logs me exact error dekhein.")
+        # Telegram notification ke baad bhi non-zero exit code dein, taaki
+        # GitHub Actions galat tarike se green/success na dikhaye.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
